@@ -1,7 +1,452 @@
 <!DOCTYPE html>
+<html lang="ko">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGL 3D 다각형 애니메이션</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            display: block;
+            width: 800px;
+            height: 600px;
+        }
+        .controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background-color: rgba(0, 0, 0, 0.5);
+            padding: 10px;
+            border-radius: 5px;
+        }
+    </style>
 </head>
 <body>
-    <h1>Hello World</h1>
+    <div class="controls">
+        <div>회전 속도: <span id="speed-value">1.0</span></div>
+        <input type="range" id="speed" min="0" max="2" step="0.1" value="1.0">
+        <button id="toggleRotation">회전 중지/시작</button>
+    </div>
+    <canvas id="glCanvas"></canvas>
+
+    <script>
+        let canvas;
+        let gl;
+        let rotationSpeed = 1.0;
+        let isRotating = true;
+
+        // 셰이더 소스
+        const vsSource = `
+            attribute vec4 aVertexPosition;
+            attribute vec4 aVertexColor;
+            
+            uniform mat4 uModelViewMatrix;
+            uniform mat4 uProjectionMatrix;
+            
+            varying lowp vec4 vColor;
+            
+            void main() {
+                gl_Position = uProjectionMatrix * uModelViewMatrix * aVertexPosition;
+                vColor = aVertexColor;
+            }
+        `;
+
+        const fsSource = `
+            varying lowp vec4 vColor;
+            
+            void main() {
+                gl_FragColor = vColor;
+            }
+        `;
+
+        // 셰이더 프로그램 초기화
+        function initShaderProgram(gl, vsSource, fsSource) {
+            const vertexShader = loadShader(gl, gl.VERTEX_SHADER, vsSource);
+            const fragmentShader = loadShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+            const shaderProgram = gl.createProgram();
+            gl.attachShader(shaderProgram, vertexShader);
+            gl.attachShader(shaderProgram, fragmentShader);
+            gl.linkProgram(shaderProgram);
+
+            if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+                console.error('셰이더 프로그램 초기화 실패: ' + gl.getProgramInfoLog(shaderProgram));
+                return null;
+            }
+
+            return shaderProgram;
+        }
+
+        // 셰이더 로드
+        function loadShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error('셰이더 컴파일 오류: ' + gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+
+            return shader;
+        }
+
+        // 버퍼 초기화
+        function initBuffers(gl) {
+            // 정이십면체 좌표 생성
+            const vertices = [];
+            const colors = [];
+            const indices = [];
+            
+            // 황금비(Golden ratio)를 이용하여 정이십면체 생성
+            const phi = (1 + Math.sqrt(5)) / 2;
+            const vertices_data = [
+                // 꼭지점 좌표들
+                [-1, phi, 0], [1, phi, 0], [-1, -phi, 0], [1, -phi, 0],
+                [0, -1, phi], [0, 1, phi], [0, -1, -phi], [0, 1, -phi],
+                [phi, 0, -1], [phi, 0, 1], [-phi, 0, -1], [-phi, 0, 1]
+            ];
+            
+            // 면 정의
+            const faces = [
+                [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+                [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+                [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+                [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1]
+            ];
+            
+            // 각 면마다 랜덤 색상 생성
+            for (let i = 0; i < faces.length; i++) {
+                // 면마다 랜덤한 색상 생성
+                const r = Math.random() * 0.5 + 0.5; // 더 밝은 색상을 위해 0.5~1.0 범위 사용
+                const g = Math.random() * 0.5 + 0.5;
+                const b = Math.random() * 0.5 + 0.5;
+                
+                const face = faces[i];
+                
+                // 면의 첫 번째 삼각형
+                const v1 = vertices_data[face[0]];
+                const v2 = vertices_data[face[1]];
+                const v3 = vertices_data[face[2]];
+                
+                // 좌표 추가
+                vertices.push(...v1, ...v2, ...v3);
+                
+                // 색상 추가
+                for (let j = 0; j < 3; j++) {
+                    colors.push(r, g, b, 1.0);
+                }
+                
+                // 인덱스 추가 (각 면당 3개의 점)
+                const baseIndex = i * 3;
+                indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+            }
+            
+            // 정점 위치 버퍼 생성
+            const positionBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
+            
+            // 색상 버퍼 생성
+            const colorBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, colorBuffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
+            
+            // 인덱스 버퍼 생성
+            const indexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+            gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+            
+            return {
+                position: positionBuffer,
+                color: colorBuffer,
+                indices: indexBuffer,
+                vertexCount: indices.length
+            };
+        }
+
+        // 장면 그리기
+        function drawScene(gl, programInfo, buffers, deltaTime) {
+            gl.clearColor(0.0, 0.0, 0.0, 1.0);
+            gl.clearDepth(1.0);
+            gl.enable(gl.DEPTH_TEST);
+            gl.depthFunc(gl.LEQUAL);
+            
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            
+            // 원근 투영 행렬 생성
+            const fieldOfView = 45 * Math.PI / 180;
+            const aspect = gl.canvas.clientWidth / gl.canvas.clientHeight;
+            const zNear = 0.1;
+            const zFar = 100.0;
+            const projectionMatrix = mat4.create();
+            
+            mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
+            
+            // 모델-뷰 행렬 설정
+            const modelViewMatrix = mat4.create();
+            
+            // 카메라 위치
+            mat4.translate(modelViewMatrix, modelViewMatrix, [0.0, 0.0, -5.0]);
+            
+            // 회전 애니메이션
+            if (isRotating) {
+                const rotationFactor = rotationSpeed * deltaTime * 0.001;
+                mat4.rotate(modelViewMatrix, modelViewMatrix, rotationFactor, [1, 1, 0]); // X, Y축 회전
+            }
+            
+            // 정점 위치 버퍼 설정
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
+            gl.vertexAttribPointer(
+                programInfo.attribLocations.vertexPosition,
+                3,
+                gl.FLOAT,
+                false,
+                0,
+                0
+            );
+            gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
+            
+            // 색상 버퍼 설정
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffers.color);
+            gl.vertexAttribPointer(
+                programInfo.attribLocations.vertexColor,
+                4,
+                gl.FLOAT,
+                false,
+                0,
+                0
+            );
+            gl.enableVertexAttribArray(programInfo.attribLocations.vertexColor);
+            
+            // 인덱스 버퍼 설정
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buffers.indices);
+            
+            // 셰이더 프로그램 사용
+            gl.useProgram(programInfo.program);
+            
+            // 셰이더 유니폼 설정
+            gl.uniformMatrix4fv(
+                programInfo.uniformLocations.projectionMatrix,
+                false,
+                projectionMatrix
+            );
+            gl.uniformMatrix4fv(
+                programInfo.uniformLocations.modelViewMatrix,
+                false,
+                modelViewMatrix
+            );
+            
+            // 다각형 그리기
+            gl.drawElements(gl.TRIANGLES, buffers.vertexCount, gl.UNSIGNED_SHORT, 0);
+        }
+
+        // 4x4 행렬 연산을 위한 glMatrix 라이브러리의 mat4 객체
+        const mat4 = {
+            create: function() {
+                let out = new Float32Array(16);
+                out[0] = 1;
+                out[5] = 1;
+                out[10] = 1;
+                out[15] = 1;
+                return out;
+            },
+            
+            perspective: function(out, fovy, aspect, near, far) {
+                const f = 1.0 / Math.tan(fovy / 2);
+                out[0] = f / aspect;
+                out[1] = 0;
+                out[2] = 0;
+                out[3] = 0;
+                out[4] = 0;
+                out[5] = f;
+                out[6] = 0;
+                out[7] = 0;
+                out[8] = 0;
+                out[9] = 0;
+                out[10] = (far + near) / (near - far);
+                out[11] = -1;
+                out[12] = 0;
+                out[13] = 0;
+                out[14] = (2 * far * near) / (near - far);
+                out[15] = 0;
+                return out;
+            },
+            
+            translate: function(out, a, v) {
+                const x = v[0], y = v[1], z = v[2];
+                let a00, a01, a02, a03;
+                let a10, a11, a12, a13;
+                let a20, a21, a22, a23;
+                
+                if (a === out) {
+                    out[12] = a[0] * x + a[4] * y + a[8] * z + a[12];
+                    out[13] = a[1] * x + a[5] * y + a[9] * z + a[13];
+                    out[14] = a[2] * x + a[6] * y + a[10] * z + a[14];
+                    out[15] = a[3] * x + a[7] * y + a[11] * z + a[15];
+                } else {
+                    a00 = a[0]; a01 = a[1]; a02 = a[2]; a03 = a[3];
+                    a10 = a[4]; a11 = a[5]; a12 = a[6]; a13 = a[7];
+                    a20 = a[8]; a21 = a[9]; a22 = a[10]; a23 = a[11];
+                    
+                    out[0] = a00; out[1] = a01; out[2] = a02; out[3] = a03;
+                    out[4] = a10; out[5] = a11; out[6] = a12; out[7] = a13;
+                    out[8] = a20; out[9] = a21; out[10] = a22; out[11] = a23;
+                    
+                    out[12] = a00 * x + a10 * y + a20 * z + a[12];
+                    out[13] = a01 * x + a11 * y + a21 * z + a[13];
+                    out[14] = a02 * x + a12 * y + a22 * z + a[14];
+                    out[15] = a03 * x + a13 * y + a23 * z + a[15];
+                }
+                
+                return out;
+            },
+            
+            rotate: function(out, a, rad, axis) {
+                let x = axis[0], y = axis[1], z = axis[2];
+                let len = Math.hypot(x, y, z);
+                
+                if (len < 0.000001) { return null; }
+                
+                len = 1 / len;
+                x *= len;
+                y *= len;
+                z *= len;
+                
+                const s = Math.sin(rad);
+                const c = Math.cos(rad);
+                const t = 1 - c;
+                
+                const a00 = a[0], a01 = a[1], a02 = a[2], a03 = a[3];
+                const a10 = a[4], a11 = a[5], a12 = a[6], a13 = a[7];
+                const a20 = a[8], a21 = a[9], a22 = a[10], a23 = a[11];
+                
+                // 회전 행렬 계수
+                const b00 = x * x * t + c;
+                const b01 = y * x * t + z * s;
+                const b02 = z * x * t - y * s;
+                const b10 = x * y * t - z * s;
+                const b11 = y * y * t + c;
+                const b12 = z * y * t + x * s;
+                const b20 = x * z * t + y * s;
+                const b21 = y * z * t - x * s;
+                const b22 = z * z * t + c;
+                
+                // 행렬 곱셈
+                out[0] = a00 * b00 + a10 * b01 + a20 * b02;
+                out[1] = a01 * b00 + a11 * b01 + a21 * b02;
+                out[2] = a02 * b00 + a12 * b01 + a22 * b02;
+                out[3] = a03 * b00 + a13 * b01 + a23 * b02;
+                out[4] = a00 * b10 + a10 * b11 + a20 * b12;
+                out[5] = a01 * b10 + a11 * b11 + a21 * b12;
+                out[6] = a02 * b10 + a12 * b11 + a22 * b12;
+                out[7] = a03 * b10 + a13 * b11 + a23 * b12;
+                out[8] = a00 * b20 + a10 * b21 + a20 * b22;
+                out[9] = a01 * b20 + a11 * b21 + a21 * b22;
+                out[10] = a02 * b20 + a12 * b21 + a22 * b22;
+                out[11] = a03 * b20 + a13 * b21 + a23 * b22;
+                
+                if (a !== out) {
+                    out[12] = a[12];
+                    out[13] = a[13];
+                    out[14] = a[14];
+                    out[15] = a[15];
+                }
+                
+                return out;
+            }
+        };
+
+        // 메인 함수
+        function main() {
+            canvas = document.getElementById('glCanvas');
+            gl = canvas.initWebGL();
+            
+            if (!gl) {
+                alert('WebGL을 초기화할 수 없습니다. 브라우저가 WebGL을 지원하지 않을 수 있습니다.');
+                return;
+            }
+            
+            // 캔버스 크기 설정
+            canvas.width = canvas.clientWidth;
+            canvas.height = canvas.clientHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            
+            // 셰이더 프로그램 초기화
+            const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
+            
+            // 셰이더 프로그램 정보
+            const programInfo = {
+                program: shaderProgram,
+                attribLocations: {
+                    vertexPosition: gl.getAttribLocation(shaderProgram, 'aVertexPosition'),
+                    vertexColor: gl.getAttribLocation(shaderProgram, 'aVertexColor'),
+                },
+                uniformLocations: {
+                    projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
+                    modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
+                },
+            };
+            
+            // 버퍼 초기화
+            const buffers = initBuffers(gl);
+            
+            // 시간 관련 변수
+            let then = 0;
+            
+            // 애니메이션 루프
+            function render(now) {
+                now *= 0.001;  // 밀리초를 초로 변환
+                const deltaTime = now - then;
+                then = now;
+                
+                drawScene(gl, programInfo, buffers, deltaTime);
+                
+                requestAnimationFrame(render);
+            }
+            
+            // 애니메이션 시작
+            requestAnimationFrame(render);
+            
+            // 컨트롤 이벤트 설정
+            const speedSlider = document.getElementById('speed');
+            const speedValue = document.getElementById('speed-value');
+            const toggleButton = document.getElementById('toggleRotation');
+            
+            speedSlider.addEventListener('input', function() {
+                rotationSpeed = parseFloat(this.value);
+                speedValue.textContent = rotationSpeed.toFixed(1);
+            });
+            
+            toggleButton.addEventListener('click', function() {
+                isRotating = !isRotating;
+                this.textContent = isRotating ? '회전 중지' : '회전 시작';
+            });
+        }
+        
+        // WebGL 초기화 메서드를 HTMLCanvasElement 프로토타입에 추가
+        HTMLCanvasElement.prototype.initWebGL = function() {
+            let gl = null;
+            try {
+                gl = this.getContext('webgl') || this.getContext('experimental-webgl');
+            } catch(e) {
+                console.log('WebGL 초기화 중 오류 발생: ' + e.toString());
+            }
+            return gl;
+        };
+        
+        // 페이지 로드 시 메인 함수 실행
+        window.onload = main;
+    </script>
 </body>
 </html>
